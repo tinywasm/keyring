@@ -1,0 +1,38 @@
+graph TD
+    subgraph "Consumer"
+        APP[Application<br/>Updater / Deploy]
+    end
+
+    subgraph "tinywasm/keyring"
+        KM[KeyManager]
+        API[Public API<br/>Setup, Get, Rotate]
+    end
+
+    subgraph "External Library"
+        ZK[zalando/go-keyring]
+    end
+
+    subgraph "OS Security Layer"
+        subgraph "Windows"
+            CM[Credential Manager]
+        end
+        subgraph "Linux"
+            SS[Secret Service / DBus]
+        end
+        subgraph "macOS"
+            KC[Keychain]
+        end
+    end
+
+    APP --> API
+    API --> KM
+    KM --> ZK
+    ZK -.Build Tag.-> CM
+    ZK -.Build Tag.-> SS
+    ZK -.Build Tag.-> KC
+
+    style KM fill:#e1f5ff
+    style ZK fill:#ffe1e1
+    style CM fill:#fff4e1
+    style SS fill:#fff4e1
+    style KC fill:#fff4e1

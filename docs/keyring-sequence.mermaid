@@ -1,0 +1,39 @@
+sequenceDiagram
+    participant App
+    participant KM as KeyManager
+    participant ZK as zalando/go-keyring
+    participant OS as OS Keyring
+
+    %% Setup
+    Note over App,OS: Setup / Initialization
+    App->>KM: Setup(hmacSecret, githubPAT)
+    activate KM
+    KM->>ZK: Set(Service, "hmac-secret", val)
+    ZK->>OS: Store Secret
+    OS-->>ZK: Success
+    KM->>ZK: Set(Service, "github-pat", val)
+    ZK->>OS: Store Secret
+    OS-->>ZK: Success
+    KM-->>App: nil (OK)
+    deactivate KM
+
+    %% Retrieval
+    Note over App,OS: Runtime Retrieval
+    App->>KM: GetHMACSecret()
+    activate KM
+    KM->>ZK: Get(Service, "hmac-secret")
+    ZK->>OS: Retrieve Secret
+    OS-->>ZK: secret value
+    ZK-->>KM: value
+    KM-->>App: value
+    deactivate KM
+
+    %% Rotation
+    Note over App,OS: Secret Rotation
+    App->>KM: RotateHMACSecret(newVal)
+    activate KM
+    KM->>ZK: Set(Service, "hmac-secret", newVal)
+    ZK->>OS: Update Secret
+    OS-->>ZK: Success
+    KM-->>App: nil (OK)
+    deactivate KM
