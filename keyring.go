@@ -29,6 +29,17 @@ func NewKeyring(service string) (*Keyring, error) {
 	return k, nil
 }
 
+// OpenKeyring creates a Keyring scoped to service without probing the system
+// keyring: nothing touches the OS until the first Get/Set/Delete. Use it when
+// the store is only needed conditionally (e.g. session recovery) or in flows
+// that may legitimately run without a keyring (CI with GH_TOKEN).
+func OpenKeyring(service string) *Keyring {
+	return &Keyring{
+		service: service,
+		log:     func(...any) {},
+	}
+}
+
 // SetLog sets the logging function.
 func (k *Keyring) SetLog(fn func(...any)) {
 	if fn != nil {

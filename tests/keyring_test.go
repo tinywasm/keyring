@@ -119,6 +119,23 @@ func TestKeyring_SetLog_IgnoresNil(t *testing.T) {
 	kr.SetLog(func(...any) {})
 }
 
+func TestOpenKeyring_IsLazy(t *testing.T) {
+	// OpenKeyring must not probe or touch the backend at all.
+	kr := keyring.OpenKeyring("lazy-service")
+	if kr == nil {
+		t.Fatal("expected a Keyring")
+	}
+
+	// Still a fully working store once the backend is in place.
+	useMemProvider(t)
+	if err := kr.Set("k", "v"); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+	if got, _ := kr.Get("k"); got != "v" {
+		t.Fatalf("got %q, want %q", got, "v")
+	}
+}
+
 func TestKeyManager_RoundTrip(t *testing.T) {
 	useMemProvider(t)
 
