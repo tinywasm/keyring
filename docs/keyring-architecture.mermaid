@@ -1,11 +1,13 @@
 graph TD
     subgraph "Consumer"
-        APP[Application<br/>Updater / Deploy]
+        APP[Application<br/>Updater / Deploy / CLI]
     end
 
     subgraph "tinywasm/keyring"
         KM[KeyManager]
-        API[Public API<br/>Setup, Get, Rotate]
+        KR[Keyring<br/>service-scoped]
+        API[Public API<br/>Setup, Get, Rotate, Set, Delete]
+        PR[Provider<br/>SetProvider / GetProvider]
     end
 
     subgraph "External Library"
@@ -25,13 +27,18 @@ graph TD
     end
 
     APP --> API
+    API --> KR
     API --> KM
-    KM --> ZK
-    ZK -.Build Tag.-> CM
-    ZK -.Build Tag.-> SS
-    ZK -.Build Tag.-> KC
+    KM --> KR
+    KR --> PR
+    PR --> ZK
+    ZK --> CM
+    ZK --> SS
+    ZK --> KC
 
+    style KR fill:#e1f5ff
     style KM fill:#e1f5ff
+    style PR fill:#e1f5ff
     style ZK fill:#ffe1e1
     style CM fill:#fff4e1
     style SS fill:#fff4e1

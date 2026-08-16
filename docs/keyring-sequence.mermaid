@@ -1,39 +1,37 @@
 sequenceDiagram
     participant App
-    participant KM as KeyManager
+    participant KR as Keyring (service-scoped)
+    participant PR as Provider
     participant ZK as zalando/go-keyring
     participant OS as OS Keyring
 
-    %% Setup
     Note over App,OS: Setup / Initialization
-    App->>KM: Setup(hmacSecret, githubPAT)
-    activate KM
-    KM->>ZK: Set(Service, "hmac-secret", val)
+    App->>KR: NewKeyring("my-app")
+    activate KR
+    KR->>PR: Set(service, "_probe", "test")
+    PR->>ZK: Set(service, "_probe", "test")
     ZK->>OS: Store Secret
     OS-->>ZK: Success
-    KM->>ZK: Set(Service, "github-pat", val)
-    ZK->>OS: Store Secret
-    OS-->>ZK: Success
-    KM-->>App: nil (OK)
-    deactivate KM
+    ZK-->>PR: nil
+    PR-->>KR: nil
+    KR-->>App: *Keyring
+    deactivate KR
 
-    %% Retrieval
-    Note over App,OS: Runtime Retrieval
-    App->>KM: GetHMACSecret()
-    activate KM
-    KM->>ZK: Get(Service, "hmac-secret")
+    Note over App,OS: Write / Read / Rotate
+    App->>KR: Set(key, value)
+    KR->>PR: Set(service, key, value)
+    PR->>ZK: Set(service, key, value)
+    ZK->>OS: Store Secret
+    OS-->>ZK: Success
+    ZK-->>KR: nil
+
+    App->>KR: Get(key)
+    KR->>PR: Get(service, key)
+    PR->>ZK: Get(service, key)
     ZK->>OS: Retrieve Secret
-    OS-->>ZK: secret value
-    ZK-->>KM: value
-    KM-->>App: value
-    deactivate KM
+    OS-->>ZK: value
+    ZK-->>KR: value
+    KR-->>App: value
 
-    %% Rotation
-    Note over App,OS: Secret Rotation
-    App->>KM: RotateHMACSecret(newVal)
-    activate KM
-    KM->>ZK: Set(Service, "hmac-secret", newVal)
-    ZK->>OS: Update Secret
-    OS-->>ZK: Success
-    KM-->>App: nil (OK)
-    deactivate KM
+    Note over App,OS: KeyManager delegates to a Keyring<br/>scoped to ServiceName (updater-cicd)
+    App->>KR: KeyManager.Setup / Rotate / DeleteAll

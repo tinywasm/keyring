@@ -1,17 +1,42 @@
-# GESTIÓN DE SECRETOS (KEYRING)
+# Gestión de secretos (keyring)
 
-La librería `tinywasm/keyring` proporciona una interfaz unificada y segura para gestionar secretos del sistema, utilizando el almacenamiento seguro nativo del sistema operativo (Windows Credential Manager en Windows).
+`tinywasm/keyring` proporciona almacenamiento seguro de credenciales sobre el
+keyring nativo del sistema operativo (Windows Credential Manager, macOS
+Keychain, Linux Secret Service), con una capa de instalación automática en
+Linux cuando falta `gnome-keyring`.
 
-## Implementación
+Internamente usa [zalando/go-keyring](https://github.com/zalando/go-keyring).
 
-Esta librería utiliza internamente [zalando/go-keyring](https://github.com/zalando/go-keyring).
+## API
 
-### Diagramas
+### Keyring genérico (por servicio)
 
-- [Arquitectura](keyring-architecture.mermaid)
-- [Secuencia de Operaciones](keyring-sequence.mermaid)
+La API recomendada. Cada `Keyring` está acotado a un *service name*: la misma
+clave en servicios distintos nunca colisiona, así un proceso puede gestionar
+secretos de varias aplicaciones.
 
-### Constantes Definidas
+```go
+import "github.com/tinywasm/keyring"
+
+// Verifica el backend y auto-instala dependencias en Linux si faltan.
+kr, err := keyring.NewKeyring("my-app")
+if err != nil {
+    // keyring no disponible (o instalación fallida)
+}
+kr.SetLog(log.Printf) // opcional
+
+kr.Set("github_token", "ghp_...")   // guardar
+token, err := kr.Get("github_token") // leer
+kr.Delete("github_token")            // borrar
+```
+
+> Es el tipo que implementa `SecretStore` de `github.com/tinywasm/git`:
+> inyecta `keyring.NewKeyring("devflow")` para conservar los tokens ya
+> almacenados, o un store en memoria en tests/CI.
+
+### KeyManager (servicio `updater-cicd`)
+
+Maneja los secretos clásicos del servicio `updater-cicd`:
 
 ```go
 const (
@@ -21,61 +46,49 @@ const (
 )
 ```
 
-### API
-
-#### Inicialización
-
 ```go
-import "github.com/tinywasm/keyring"
-
 km := keyring.New()
-```
 
-#### Setup Inicial
-
-Configura los secretos por primera vez.
-
-```go
+// Setup inicial (primera ejecución)
 err := km.Setup("hmac-secret-value", "github-pat-value")
-if err != nil {
-    // Manejo de error
-}
-```
 
-#### Obtención de Secretos
-
-Recupera los valores almacenados de forma segura.
-
-```go
-// Obtener HMAC Secret
+// Lectura
 hmacSecret, err := km.GetHMACSecret()
-
-// Obtener GitHub PAT
 githubPAT, err := km.GetGitHubPAT()
-```
 
-#### Rotación de Secretos
+// Rotación
+err = km.RotateHMACSecret("new-hmac")
+err = km.RotateGitHubPAT("new-pat")
 
-Actualiza los valores existentes.
-
-```go
-// Rotar HMAC
-err := km.RotateHMACSecret("new-hmac-secret")
-
-// Rotar PAT
-err := km.RotateGitHubPAT("new-github-pat")
-```
-
-#### Utilidades
-
-```go
-// Verificar si ya está configurado (existen ambos secretos)
+// Utilidades
 configured := km.IsConfigured()
-
-// Eliminar todos los secretos (Factory Reset)
-err := km.DeleteAll()
+err = km.DeleteAll() // reset completo
 ```
 
-## Requisitos del Sistema
+## Backend intercambiable (tests)
 
-- **Windows**: Requiere acceso al Credential Manager. El usuario que ejecuta la aplicación debe ser el mismo que almacenó los secretos (o tener permisos adecuados).
+Las operaciones pasan por la interfaz `Provider`. Por defecto el backend es el
+keyring del sistema; los tests lo sustituyen por un proveedor en memoria y lo
+restauran después:
+
+```go
+real := keyring.GetProvider()
+keyring.SetProvider(myMemProvider)
+defer keyring.SetProvider(real)
+```
+
+La verificación de `NewKeyring` y todas las operaciones funcionan contra el
+proveedor inyectado — ningún test toca credenciales reales.
+
+## Diagramas
+
+- [Arquitectura](keyring-architecture.mermaid)
+- [Secuencia de Operaciones](keyring-sequence.mermaid)
+
+## Requisitos del sistema
+
+- **Linux**: `gnome-keyring` + `libsecret` (auto-instalables vía apt/dnf/pacman
+  con `NewKeyring`, y `gnome-keyring-daemon` se arranca si no corre).
+- **Windows**: Credential Manager; el usuario que ejecuta la app debe ser el
+  que almacenó los secretos (o tener permisos adecuados).
+- **macOS**: Keychain.
