@@ -190,8 +190,3 @@ func (p *Provider) findServiceItems(svc *SecretService, service string) ([]Objec
 	return results, nil
 }
 
-func (svc *SecretService) CloseConn() {
-	if svc.Conn != nil {
-		_ = svc.Conn.Close()
-	}
-}

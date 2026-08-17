@@ -5,7 +5,7 @@ package browser
 import (
 	"syscall/js"
 
-	_ "github.com/tinywasm/await"
+	"github.com/tinywasm/await"
 	"github.com/tinywasm/keyring"
 )
 
@@ -31,7 +31,7 @@ func ensureKeys() (js.Value, error) {
 	usagesKEK := js.Global().Get("Array").New("wrapKey", "unwrapKey")
 
 	kekPromise := subtle.Call("generateKey", genKEKOpts, false, usagesKEK)
-	deviceKEK, err := awaitPromise(kekPromise)
+	deviceKEK, err := await.Promise(kekPromise)
 	if err != nil {
 		return js.Undefined(), keyring.Wrap("keyring/browser: generate device KEK", err)
 	}
@@ -42,13 +42,13 @@ func ensureKeys() (js.Value, error) {
 	usagesDEK := js.Global().Get("Array").New("encrypt", "decrypt")
 
 	dekPromise := subtle.Call("generateKey", genDEKOpts, true, usagesDEK)
-	tempDEK, err := awaitPromise(dekPromise)
+	tempDEK, err := await.Promise(dekPromise)
 	if err != nil {
 		return js.Undefined(), keyring.Wrap("keyring/browser: generate DEK", err)
 	}
 
 	wrapPromise := subtle.Call("wrapKey", "raw", tempDEK, deviceKEK, "AES-KW")
-	wrappedAB, err := awaitPromise(wrapPromise)
+	wrappedAB, err := await.Promise(wrapPromise)
 	if err != nil {
 		return js.Undefined(), keyring.Wrap("keyring/browser: wrap DEK", err)
 	}
@@ -76,7 +76,7 @@ func unwrapDEK(wrappedDEK []byte, kek js.Value, extractable bool) (js.Value, err
 	wrappedArr := sliceToUint8Array(wrappedDEK)
 
 	unwrapPromise := subtle.Call("unwrapKey", "raw", wrappedArr, kek, "AES-KW", alg, extractable, usages)
-	dek, err := awaitPromise(unwrapPromise)
+	dek, err := await.Promise(unwrapPromise)
 	if err != nil {
 		return js.Undefined(), err
 	}
@@ -90,7 +90,7 @@ func encryptAESGCM(dek js.Value, iv []byte, plaintext []byte) ([]byte, error) {
 	alg.Set("iv", sliceToUint8Array(iv))
 
 	promise := subtle.Call("encrypt", alg, dek, sliceToUint8Array(plaintext))
-	cipherAB, err := awaitPromise(promise)
+	cipherAB, err := await.Promise(promise)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func decryptAESGCM(dek js.Value, iv []byte, ciphertext []byte) ([]byte, error) {
 	alg.Set("iv", sliceToUint8Array(iv))
 
 	promise := subtle.Call("decrypt", alg, dek, sliceToUint8Array(ciphertext))
-	plainAB, err := awaitPromise(promise)
+	plainAB, err := await.Promise(promise)
 	if err != nil {
 		return nil, keyring.ErrNotFound
 	}

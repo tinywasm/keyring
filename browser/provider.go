@@ -5,7 +5,6 @@ package browser
 import (
 	"syscall/js"
 
-	_ "github.com/tinywasm/await"
 	"github.com/tinywasm/keyring"
 )
 

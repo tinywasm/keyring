@@ -1,92 +1,68 @@
+// Portions Copyright (c) 2014 Zalando SE — MIT
+//
+// Ported from github.com/zalando/go-keyring's secret_service package, with
+// github.com/godbus/dbus/v5 replaced by github.com/tinywasm/dbus. The call
+// sequence, the attribute map and the prompt handling are reproduced as-is:
+// each of them is a behaviour real Secret Service daemons depend on.
+
 package linux
 
 import (
-	"fmt"
+	"time"
 
-	dbus "github.com/tinywasm/dbus"
+	"github.com/tinywasm/dbus"
+	"github.com/tinywasm/keyring"
 )
 
-type ObjectPath string
-type Variant struct{ val any }
+// ObjectPath is the D-Bus object path type, aliased so this package's callers
+// need not import tinywasm/dbus directly.
+type ObjectPath = dbus.ObjectPath
 
-func MakeVariant(v any) Variant { return Variant{val: v} }
-func (v Variant) Value() any    { return v.val }
+// Conn is a session bus connection.
+type Conn = dbus.Conn
 
-type Signal struct {
-	Name string
-	Body []any
-}
+const (
+	serviceName         = "org.freedesktop.secrets"
+	servicePath         = ObjectPath("/org/freedesktop/secrets")
+	serviceInterface    = "org.freedesktop.Secret.Service"
+	collectionInterface = "org.freedesktop.Secret.Collection"
+	itemInterface       = "org.freedesktop.Secret.Item"
+	sessionInterface    = "org.freedesktop.Secret.Session"
+	promptInterface     = "org.freedesktop.Secret.Prompt"
 
-type Call struct {
-	Err error
-}
+	loginCollectionAlias = ObjectPath("/org/freedesktop/secrets/aliases/default")
+	loginCollectionPath  = ObjectPath("/org/freedesktop/secrets/collection/login")
 
-func (c *Call) Store(out ...any) error {
-	return c.Err
-}
+	noPrompt = ObjectPath("/")
 
-type BusObject interface {
-	Call(method string, flags int, args ...any) *Call
-	GetProperty(prop string) (Variant, error)
-	Path() ObjectPath
-}
+	// promptTimeout bounds the wait for a Prompt.Completed signal. The user may
+	// simply walk away from an unlock dialog; without this the call would block
+	// the caller forever.
+	promptTimeout = 2 * time.Minute
+)
 
-type Conn struct {
-	db *dbus.Dbus
-}
-
-func SessionBus() (*Conn, error) {
-	return &Conn{db: dbus.New()}, nil
-}
-
-func (c *Conn) Close() error { return nil }
-
-func (c *Conn) Object(dest string, path ObjectPath) BusObject {
-	return &fakeBusObject{dest: dest, path: path}
-}
-
-func (c *Conn) AddMatchSignal(options ...any) error    { return nil }
-func (c *Conn) RemoveMatchSignal(options ...any) error { return nil }
-func (c *Conn) Signal(ch chan<- *Signal)               {}
-
-type fakeBusObject struct {
-	dest string
+// busObject pairs a remote object with its path. dbus.Object does not expose
+// its own path, and the Secret Service call sequence needs it (Unlock takes the
+// collection path, GetSecret takes the session path).
+type busObject struct {
+	obj  *dbus.Object
 	path ObjectPath
 }
 
-func (f *fakeBusObject) Path() ObjectPath { return f.path }
+// Path returns the object's D-Bus path.
+func (b *busObject) Path() ObjectPath { return b.path }
 
-func (f *fakeBusObject) Call(method string, flags int, args ...any) *Call {
-	return &Call{Err: fmt.Errorf("dbus call %s not implemented on fake", method)}
-}
-
-func (f *fakeBusObject) GetProperty(prop string) (Variant, error) {
-	return Variant{}, fmt.Errorf("property %s not implemented on fake", prop)
-}
-
-const (
-	serviceName          = "org.freedesktop.secrets"
-	servicePath          = ObjectPath("/org/freedesktop/secrets")
-	serviceInterface     = "org.freedesktop.Secret.Service"
-	collectionInterface  = "org.freedesktop.Secret.Collection"
-	collectionsInterface = "org.freedesktop.Secret.Service.Collections"
-	itemInterface        = "org.freedesktop.Secret.Item"
-	sessionInterface     = "org.freedesktop.Secret.Session"
-	promptInterface      = "org.freedesktop.Secret.Prompt"
-
-	loginCollectionAlias = ObjectPath("/org/freedesktop/secrets/aliases/default")
-	collectionBasePath   = ObjectPath("/org/freedesktop/secrets/collection/")
-)
-
-// Secret defines a org.freedesktop.Secret.Item secret struct.
+// Secret is the org.freedesktop.Secret.Item secret structure. Its D-Bus
+// signature is (oayays) and the field order is part of the wire format — do not
+// reorder.
 type Secret struct {
 	Session     ObjectPath
 	Parameters  []byte
 	Value       []byte
-	ContentType string `dbus:"content_type"`
+	ContentType string
 }
 
-// NewSecret initializes a new Secret.
+// NewSecret initializes a Secret for a plain (unencrypted) session.
 func NewSecret(session ObjectPath, secret string) Secret {
 	return Secret{
 		Session:     session,
@@ -96,189 +72,241 @@ func NewSecret(session ObjectPath, secret string) Secret {
 	}
 }
 
+// SecretService is a client of the org.freedesktop.secrets D-Bus API.
 type SecretService struct {
 	*Conn
-	object BusObject
+	object *busObject
 }
 
+// SessionBus dials the session bus.
+func SessionBus() (*Conn, error) {
+	return dbus.SessionBus()
+}
+
+// NewSecretService opens its own connection to the session bus.
 func NewSecretService() (*SecretService, error) {
 	conn, err := SessionBus()
 	if err != nil {
 		return nil, err
 	}
-
-	return &SecretService{
-		conn,
-		conn.Object(serviceName, servicePath),
-	}, nil
+	return NewSecretServiceOnConn(conn), nil
 }
 
+// NewSecretServiceOnConn reuses an existing connection. Tests inject a
+// connection to a fake bus through it.
 func NewSecretServiceOnConn(conn *Conn) *SecretService {
 	return &SecretService{
-		Conn:   conn,
-		object: conn.Object(serviceName, servicePath),
+		Conn: conn,
+		object: &busObject{
+			obj:  conn.Object(serviceName, servicePath),
+			path: servicePath,
+		},
 	}
 }
 
-func (s *SecretService) OpenSession() (BusObject, error) {
-	var disregard Variant
+// CloseConn closes the underlying bus connection.
+func (svc *SecretService) CloseConn() {
+	if svc.Conn != nil {
+		_ = svc.Conn.Close()
+	}
+}
+
+// OpenSession opens a plain (unencrypted) secret service session.
+func (svc *SecretService) OpenSession() (*busObject, error) {
+	var disregard dbus.Variant
 	var sessionPath ObjectPath
-	err := s.object.Call(serviceInterface+".OpenSession", 0, "plain", MakeVariant("")).Store(&disregard, &sessionPath)
+
+	err := svc.object.obj.
+		Call(serviceInterface+".OpenSession", "plain", dbus.MakeVariant("")).
+		Store(&disregard, &sessionPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return s.Object(serviceName, sessionPath), nil
+	return &busObject{
+		obj:  svc.Conn.Object(serviceName, sessionPath),
+		path: sessionPath,
+	}, nil
 }
 
-func (s *SecretService) CheckCollectionPath(path ObjectPath) error {
-	obj := s.Conn.Object(serviceName, servicePath)
-	val, err := obj.GetProperty(collectionsInterface)
+// Close closes a session opened with OpenSession. Sessions accumulate in the
+// daemon for the life of the process if this is skipped.
+func (svc *SecretService) Close(session *busObject) error {
+	return session.obj.Call(sessionInterface + ".Close").Err
+}
+
+// checkCollectionPath reports whether path appears in the service's Collections
+// property.
+func (svc *SecretService) checkCollectionPath(path ObjectPath) error {
+	val, err := svc.object.obj.GetProperty(serviceInterface, "Collections")
 	if err != nil {
 		return err
 	}
 	paths, ok := val.Value().([]ObjectPath)
 	if !ok {
-		return fmt.Errorf("invalid collections property type")
+		return keyring.ErrUnavailable
 	}
 	for _, p := range paths {
 		if p == path {
 			return nil
 		}
 	}
-	return fmt.Errorf("path not found")
+	return keyring.ErrNotFound
 }
 
-func (s *SecretService) GetLoginCollection() BusObject {
-	path := ObjectPath(string(collectionBasePath) + "login")
-	if err := s.CheckCollectionPath(path); err != nil {
+// GetLoginCollection returns the collection secrets are stored in.
+//
+// It prefers the literal /collection/login path and falls back to the default
+// alias. Both forms are needed: distributions differ, and each one alone fails
+// on some of them.
+func (svc *SecretService) GetLoginCollection() *busObject {
+	path := loginCollectionPath
+	if err := svc.checkCollectionPath(path); err != nil {
 		path = loginCollectionAlias
 	}
-	return s.Object(serviceName, path)
+	return &busObject{
+		obj:  svc.Conn.Object(serviceName, path),
+		path: path,
+	}
 }
 
-func (s *SecretService) Unlock(collection ObjectPath) error {
+// Unlock unlocks a collection or an individual item, driving the prompt the
+// daemon returns when the keyring is locked.
+func (svc *SecretService) Unlock(path ObjectPath) error {
 	var unlocked []ObjectPath
 	var prompt ObjectPath
-	err := s.object.Call(serviceInterface+".Unlock", 0, []ObjectPath{collection}).Store(&unlocked, &prompt)
+
+	err := svc.object.obj.
+		Call(serviceInterface+".Unlock", []ObjectPath{path}).
+		Store(&unlocked, &prompt)
 	if err != nil {
 		return err
 	}
 
-	dismissed, v, err := s.handlePrompt(prompt)
+	_, v, err := svc.handlePrompt(prompt)
 	if err != nil {
 		return err
 	}
-	if dismissed {
-		return fmt.Errorf("prompt dismissed")
+	if paths, ok := v.Value().([]ObjectPath); ok {
+		unlocked = append(unlocked, paths...)
 	}
 
-	collections := v.Value()
-	switch c := collections.(type) {
-	case []ObjectPath:
-		unlocked = append(unlocked, c...)
+	if len(unlocked) != 1 || (path != loginCollectionAlias && unlocked[0] != path) {
+		return keyring.ErrUnavailable
 	}
-
-	if len(unlocked) == 0 {
-		return fmt.Errorf("failed to unlock collection '%v'", collection)
-	}
-
 	return nil
 }
 
-func (s *SecretService) Close(session BusObject) error {
-	return session.Call(sessionInterface+".Close", 0).Err
-}
-
-func (s *SecretService) CreateItem(collection BusObject, label string, attributes map[string]string, secret Secret) error {
-	properties := map[string]Variant{
-		itemInterface + ".Label":      MakeVariant(label),
-		itemInterface + ".Attributes": MakeVariant(attributes),
+// CreateItem stores a secret in a collection under the given attributes.
+func (svc *SecretService) CreateItem(collection *busObject, label string, attributes map[string]string, secret Secret) error {
+	properties := map[string]dbus.Variant{
+		itemInterface + ".Label":      dbus.MakeVariant(label),
+		itemInterface + ".Attributes": dbus.MakeVariant(attributes),
 	}
 
 	var item, prompt ObjectPath
-	err := collection.Call(collectionInterface+".CreateItem", 0, properties, secret, true).Store(&item, &prompt)
+	err := collection.obj.
+		Call(collectionInterface+".CreateItem", properties, secret, true).
+		Store(&item, &prompt)
 	if err != nil {
 		return err
 	}
 
-	dismissed, _, err := s.handlePrompt(prompt)
-	if err != nil {
-		return err
-	}
-	if dismissed {
-		return fmt.Errorf("prompt dismissed")
-	}
-
-	return nil
+	_, _, err = svc.handlePrompt(prompt)
+	return err
 }
 
-func (s *SecretService) handlePrompt(prompt ObjectPath) (bool, Variant, error) {
-	if prompt != ObjectPath("/") {
-		err := s.AddMatchSignal(prompt, promptInterface)
-		if err != nil {
-			return false, MakeVariant(""), err
-		}
-
-		defer func() {
-			_ = s.RemoveMatchSignal(prompt, promptInterface)
-		}()
-
-		promptSignal := make(chan *Signal, 1)
-		s.Signal(promptSignal)
-
-		err = s.Object(serviceName, prompt).Call(promptInterface+".Prompt", 0, "").Err
-		if err != nil {
-			return false, MakeVariant(""), err
-		}
-
-		signal := <-promptSignal
-		if signal.Name == promptInterface+".Completed" {
-			if len(signal.Body) >= 2 {
-				dismissed, _ := signal.Body[0].(bool)
-				result, _ := signal.Body[1].(Variant)
-				return dismissed, result, nil
-			}
-		}
-	}
-
-	return false, MakeVariant(""), nil
-}
-
-func (s *SecretService) SearchItems(collection BusObject, search map[string]string) ([]ObjectPath, error) {
+// SearchItems returns the item paths in collection matching every attribute in
+// search.
+func (svc *SecretService) SearchItems(collection *busObject, search map[string]string) ([]ObjectPath, error) {
 	var results []ObjectPath
-	err := collection.Call(collectionInterface+".SearchItems", 0, search).Store(&results)
+	err := collection.obj.
+		Call(collectionInterface+".SearchItems", search).
+		Store(&results)
 	if err != nil {
 		return nil, err
 	}
-
 	return results, nil
 }
 
-func (s *SecretService) GetSecret(itemPath ObjectPath, session ObjectPath) (*Secret, error) {
+// GetSecret reads an item's secret within an open session.
+func (svc *SecretService) GetSecret(itemPath, session ObjectPath) (*Secret, error) {
 	var secret Secret
-	err := s.Object(serviceName, itemPath).Call(itemInterface+".GetSecret", 0, session).Store(&secret)
+	err := svc.Conn.Object(serviceName, itemPath).
+		Call(itemInterface+".GetSecret", session).
+		Store(&secret)
 	if err != nil {
 		return nil, err
 	}
-
 	return &secret, nil
 }
 
-func (s *SecretService) Delete(itemPath ObjectPath) error {
+// Delete removes an item from its collection.
+func (svc *SecretService) Delete(itemPath ObjectPath) error {
 	var prompt ObjectPath
-	err := s.Object(serviceName, itemPath).Call(itemInterface+".Delete", 0).Store(&prompt)
+	err := svc.Conn.Object(serviceName, itemPath).
+		Call(itemInterface + ".Delete").
+		Store(&prompt)
 	if err != nil {
 		return err
 	}
 
-	dismissed, _, err := s.handlePrompt(prompt)
-	if err != nil {
-		return err
-	}
-	if dismissed {
-		return fmt.Errorf("prompt dismissed")
+	_, _, err = svc.handlePrompt(prompt)
+	return err
+}
+
+// handlePrompt drives a prompt the daemon asked for, waiting for the user to
+// answer the unlock dialog.
+//
+// The match rule and the signal channel are registered BEFORE calling Prompt:
+// the Completed signal can arrive before the Prompt call returns, and a signal
+// that lands with no channel registered is dropped, leaving the caller blocked.
+func (svc *SecretService) handlePrompt(prompt ObjectPath) (bool, dbus.Variant, error) {
+	if prompt == noPrompt || prompt == "" {
+		return false, dbus.MakeVariant(""), nil
 	}
 
-	return nil
+	rule := "type='signal',interface='" + promptInterface +
+		"',path='" + string(prompt) + "'"
+	if err := svc.Conn.AddMatch(rule); err != nil {
+		return false, dbus.MakeVariant(""), err
+	}
+	defer func() { _ = svc.Conn.RemoveMatch(rule) }()
+
+	ch := make(chan *dbus.Signal, 8)
+	svc.Conn.Signals(ch)
+
+	if err := svc.Conn.Object(serviceName, prompt).
+		Call(promptInterface + ".Prompt").Err; err != nil {
+		return false, dbus.MakeVariant(""), err
+	}
+
+	timeout := time.NewTimer(promptTimeout)
+	defer timeout.Stop()
+
+	for {
+		select {
+		case sig := <-ch:
+			if sig == nil || sig.Path != prompt || sig.Name != promptInterface+".Completed" {
+				continue
+			}
+			var dismissed bool
+			var result dbus.Variant
+			if len(sig.Body) > 0 {
+				dismissed, _ = sig.Body[0].(bool)
+			}
+			if len(sig.Body) > 1 {
+				result, _ = sig.Body[1].(dbus.Variant)
+			}
+			if dismissed {
+				// The user cancelled the unlock dialog. That is a refusal, not
+				// a transient failure: report it instead of hanging or
+				// pretending the secret is simply absent.
+				return true, result, keyring.ErrUnavailable
+			}
+			return false, result, nil
+		case <-timeout.C:
+			return false, dbus.MakeVariant(""), keyring.ErrUnavailable
+		}
+	}
 }

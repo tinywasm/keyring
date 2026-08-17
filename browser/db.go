@@ -5,7 +5,7 @@ package browser
 import (
 	"syscall/js"
 
-	_ "github.com/tinywasm/await"
+	"github.com/tinywasm/await"
 	"github.com/tinywasm/keyring"
 )
 
@@ -45,7 +45,7 @@ func openDB() (js.Value, error) {
 	defer onUpgrade.Release()
 	req.Set("onupgradeneeded", onUpgrade)
 
-	db, err := awaitRequest(req)
+	db, err := await.Request(req)
 	if err != nil {
 		return js.Undefined(), keyring.Wrap("keyring/browser: openDB", err)
 	}
@@ -69,7 +69,7 @@ func getSecretRecord(id string) (*SecretRecord, error) {
 	store := tx.Call("objectStore", storeSec)
 	req := store.Call("get", id)
 
-	res, err := awaitRequest(req)
+	res, err := await.Request(req)
 	if err != nil || !res.Truthy() {
 		return nil, keyring.ErrNotFound
 	}
@@ -94,7 +94,7 @@ func putSecretRecord(id string, iv []byte, data []byte) error {
 	rec.Set("data", sliceToUint8Array(data).Get("buffer"))
 
 	req := store.Call("put", rec)
-	_, err = awaitRequest(req)
+	_, err = await.Request(req)
 	return err
 }
 
@@ -113,7 +113,7 @@ func deleteSecretRecord(id string) error {
 	tx := db.Call("transaction", storeSec, "readwrite")
 	store := tx.Call("objectStore", storeSec)
 	req := store.Call("delete", id)
-	_, err = awaitRequest(req)
+	_, err = await.Request(req)
 	return err
 }
 
@@ -130,7 +130,7 @@ func deleteServiceSecrets(service string) error {
 	prefix := service + "\x00"
 
 	for {
-		cursorRes, err := awaitRequest(req)
+		cursorRes, err := await.Request(req)
 		if err != nil || !cursorRes.Truthy() {
 			break
 		}
@@ -139,11 +139,11 @@ func deleteServiceSecrets(service string) error {
 
 		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
 			delReq := cursor.Call("delete")
-			_, _ = awaitRequest(delReq)
+			_, _ = await.Request(delReq)
 		}
 
 		contReq := cursor.Call("continue")
-		_, err = awaitRequest(contReq)
+		_, err = await.Request(contReq)
 		if err != nil {
 			break
 		}
@@ -157,6 +157,12 @@ type KEKRecord struct {
 	Key        js.Value
 	WrappedDEK []byte
 	HKDFSalt   []byte
+	// CredentialID and RPID are set on the "passkey" record only: unlocking
+	// needs to name the credential to the authenticator, and the relying party
+	// id is part of that request. The passkey KEK itself is never stored — it
+	// is re-derived from the authenticator's PRF output on every unlock.
+	CredentialID []byte
+	RPID         string
 }
 
 func getKEKRecord(id string) (*KEKRecord, error) {
@@ -169,25 +175,31 @@ func getKEKRecord(id string) (*KEKRecord, error) {
 	store := tx.Call("objectStore", storeKEK)
 	req := store.Call("get", id)
 
-	res, err := awaitRequest(req)
+	res, err := await.Request(req)
 	if err != nil || !res.Truthy() {
 		return nil, keyring.ErrNotFound
 	}
 
 	key := res.Get("key")
 	wrappedDEK := arrayBufferToSlice(res.Get("wrappedDEK"))
-	var hkdfSalt []byte
+	rec := &KEKRecord{ID: id, Key: key, WrappedDEK: wrappedDEK}
 	if res.Get("hkdfSalt").Truthy() {
-		hkdfSalt = arrayBufferToSlice(res.Get("hkdfSalt"))
+		rec.HKDFSalt = arrayBufferToSlice(res.Get("hkdfSalt"))
 	}
-	return &KEKRecord{ID: id, Key: key, WrappedDEK: wrappedDEK, HKDFSalt: hkdfSalt}, nil
+	if res.Get("credentialId").Truthy() {
+		rec.CredentialID = arrayBufferToSlice(res.Get("credentialId"))
+	}
+	if res.Get("rpId").Truthy() {
+		rec.RPID = res.Get("rpId").String()
+	}
+	return rec, nil
 }
 
 func putKEKRecord(id string, key js.Value, wrappedDEK []byte) error {
-	return putKEKRecordWithSalt(id, key, wrappedDEK, nil)
+	return putKEKRecordFull(&KEKRecord{ID: id, Key: key, WrappedDEK: wrappedDEK})
 }
 
-func putKEKRecordWithSalt(id string, key js.Value, wrappedDEK []byte, hkdfSalt []byte) error {
+func putKEKRecordFull(rec *KEKRecord) error {
 	db, err := openDB()
 	if err != nil {
 		return err
@@ -196,17 +208,23 @@ func putKEKRecordWithSalt(id string, key js.Value, wrappedDEK []byte, hkdfSalt [
 	tx := db.Call("transaction", storeKEK, "readwrite")
 	store := tx.Call("objectStore", storeKEK)
 
-	rec := jsObject.New()
-	rec.Set("id", id)
-	if key.Truthy() {
-		rec.Set("key", key)
+	obj := jsObject.New()
+	obj.Set("id", rec.ID)
+	if rec.Key.Truthy() {
+		obj.Set("key", rec.Key)
 	}
-	rec.Set("wrappedDEK", sliceToUint8Array(wrappedDEK).Get("buffer"))
-	if len(hkdfSalt) > 0 {
-		rec.Set("hkdfSalt", sliceToUint8Array(hkdfSalt).Get("buffer"))
+	obj.Set("wrappedDEK", sliceToUint8Array(rec.WrappedDEK).Get("buffer"))
+	if len(rec.HKDFSalt) > 0 {
+		obj.Set("hkdfSalt", sliceToUint8Array(rec.HKDFSalt).Get("buffer"))
+	}
+	if len(rec.CredentialID) > 0 {
+		obj.Set("credentialId", sliceToUint8Array(rec.CredentialID).Get("buffer"))
+	}
+	if rec.RPID != "" {
+		obj.Set("rpId", rec.RPID)
 	}
 
-	req := store.Call("put", rec)
-	_, err = awaitRequest(req)
+	req := store.Call("put", obj)
+	_, err = await.Request(req)
 	return err
 }
