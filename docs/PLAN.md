@@ -3,8 +3,9 @@ PLAN: "feat: dependency-free keyring with four platform backends incl. browser"
 TAG: v0.2.0
 EXECUTOR: jules
 REVIEWER: none
-STATUS: running
+STATUS: review
 SESSION: 14521747933076742502
+PR: https://github.com/tinywasm/keyring/pull/1
 ---
 
 > This plan is dispatched via the CodeJob workflow. See skill: agents-workflow.

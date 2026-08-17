@@ -1,188 +1,146 @@
-package keyring_test
+package tests
 
 import (
-	"fmt"
+	"errors"
 	"testing"
 
 	"github.com/tinywasm/keyring"
+	auto "github.com/tinywasm/keyring/auto"
 )
 
-// memProvider is an in-memory Provider for tests: it replaces the OS keyring
-// backend so nothing touches real credentials.
-type memProvider struct {
-	store map[string]map[string]string
+type ensurerMemProvider struct {
+	MemProvider
+	ensureCalls int
+	probeFail   bool
 }
 
-func newMemProvider() *memProvider {
-	return &memProvider{store: map[string]map[string]string{}}
-}
-
-func (p *memProvider) Set(service, user, password string) error {
-	if p.store[service] == nil {
-		p.store[service] = map[string]string{}
+func (e *ensurerMemProvider) Set(service, user, pass string) error {
+	if e.probeFail && user == "keyring_test_probe" {
+		return keyring.ErrUnavailable
 	}
-	p.store[service][user] = password
+	return e.MemProvider.Set(service, user, pass)
+}
+
+func (e *ensurerMemProvider) Ensure(log func(...any)) error {
+	e.ensureCalls++
+	e.probeFail = false
 	return nil
 }
 
-func (p *memProvider) Get(service, user string) (string, error) {
-	if v, ok := p.store[service][user]; ok {
-		return v, nil
+func TestConformanceMem(t *testing.T) {
+	RunConformance(t, NewMemProvider(), true)
+}
+
+func TestNilProvider(t *testing.T) {
+	kr := keyring.OpenKeyring("svc", nil)
+	if err := kr.Set("k", "v"); !errors.Is(err, keyring.ErrNoProvider) {
+		t.Errorf("Expected ErrNoProvider from Set, got %v", err)
 	}
-	return "", fmt.Errorf("secret %q not found for service %q", user, service)
-}
-
-func (p *memProvider) Delete(service, user string) error {
-	if _, ok := p.store[service][user]; !ok {
-		return fmt.Errorf("secret %q not found for service %q", user, service)
+	if _, err := kr.Get("k"); !errors.Is(err, keyring.ErrNoProvider) {
+		t.Errorf("Expected ErrNoProvider from Get, got %v", err)
 	}
-	delete(p.store[service], user)
-	return nil
+	if err := kr.Delete("k"); !errors.Is(err, keyring.ErrNoProvider) {
+		t.Errorf("Expected ErrNoProvider from Delete, got %v", err)
+	}
+
+	_, err := keyring.NewKeyring("svc", nil)
+	if !errors.Is(err, keyring.ErrNoProvider) {
+		t.Errorf("Expected ErrNoProvider from NewKeyring, got %v", err)
+	}
 }
 
-func (p *memProvider) DeleteAll(service string) error {
-	delete(p.store, service)
-	return nil
-}
-
-// useMemProvider swaps the backend for the test and restores it afterwards.
-func useMemProvider(t *testing.T) *memProvider {
-	t.Helper()
-	real := keyring.GetProvider()
-	p := newMemProvider()
-	keyring.SetProvider(p)
-	t.Cleanup(func() { keyring.SetProvider(real) })
-	return p
-}
-
-func TestKeyring_SetGetDelete(t *testing.T) {
-	useMemProvider(t)
-
-	kr, err := keyring.NewKeyring("test-service")
+func TestEnsureRunsWhenProbeFails(t *testing.T) {
+	p := &ensurerMemProvider{
+		MemProvider: *NewMemProvider(),
+		probeFail:   true,
+	}
+	kr, err := keyring.NewKeyring("svc", p)
 	if err != nil {
-		t.Fatalf("NewKeyring failed: %v", err)
+		t.Fatalf("Expected NewKeyring success after ensure, got %v", err)
 	}
-
-	if err := kr.Set("my-key", "my-value"); err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-	got, err := kr.Get("my-key")
-	if err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-	if got != "my-value" {
-		t.Fatalf("got %q, want %q", got, "my-value")
-	}
-
-	if err := kr.Delete("my-key"); err != nil {
-		t.Fatalf("Delete failed: %v", err)
-	}
-	if _, err := kr.Get("my-key"); err == nil {
-		t.Fatal("expected error after Delete")
-	}
-}
-
-func TestKeyring_ServiceIsolation(t *testing.T) {
-	useMemProvider(t)
-
-	a, err := keyring.NewKeyring("app-a")
-	if err != nil {
-		t.Fatalf("NewKeyring app-a failed: %v", err)
-	}
-	b, err := keyring.NewKeyring("app-b")
-	if err != nil {
-		t.Fatalf("NewKeyring app-b failed: %v", err)
-	}
-
-	if err := a.Set("token", "value-a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Set("token", "value-b"); err != nil {
-		t.Fatal(err)
-	}
-
-	gotA, _ := a.Get("token")
-	gotB, _ := b.Get("token")
-	if gotA != "value-a" || gotB != "value-b" {
-		t.Fatalf("services leaked into each other: a=%q b=%q", gotA, gotB)
-	}
-}
-
-func TestKeyring_SetLog_IgnoresNil(t *testing.T) {
-	useMemProvider(t)
-
-	kr, err := keyring.NewKeyring("test-service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	kr.SetLog(nil) // must not panic
-	kr.SetLog(func(...any) {})
-}
-
-func TestOpenKeyring_IsLazy(t *testing.T) {
-	// OpenKeyring must not probe or touch the backend at all.
-	kr := keyring.OpenKeyring("lazy-service")
 	if kr == nil {
-		t.Fatal("expected a Keyring")
+		t.Fatalf("Expected non-nil keyring")
 	}
-
-	// Still a fully working store once the backend is in place.
-	useMemProvider(t)
-	if err := kr.Set("k", "v"); err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-	if got, _ := kr.Get("k"); got != "v" {
-		t.Fatalf("got %q, want %q", got, "v")
+	if p.ensureCalls != 1 {
+		t.Errorf("Expected ensureCalls to be 1, got %d", p.ensureCalls)
 	}
 }
 
-func TestKeyManager_RoundTrip(t *testing.T) {
-	useMemProvider(t)
-
-	km := keyring.New()
-	if km.IsConfigured() {
-		t.Fatal("expected not configured on empty keyring")
+func TestEnsureNeverRunsWhenProbeSucceeds(t *testing.T) {
+	p := &ensurerMemProvider{
+		MemProvider: *NewMemProvider(),
+		probeFail:   false,
 	}
-
-	if err := km.Setup("hmac-1", "pat-1"); err != nil {
-		t.Fatalf("Setup failed: %v", err)
-	}
-	if !km.IsConfigured() {
-		t.Fatal("expected configured after Setup")
-	}
-
-	hmac, err := km.GetHMACSecret()
+	_, err := keyring.NewKeyring("svc", p)
 	if err != nil {
-		t.Fatalf("GetHMACSecret failed: %v", err)
+		t.Fatalf("Expected NewKeyring success, got %v", err)
 	}
-	if hmac != "hmac-1" {
-		t.Fatalf("hmac=%q, want %q", hmac, "hmac-1")
+	if p.ensureCalls != 0 {
+		t.Errorf("Expected ensureCalls to be 0, got %d", p.ensureCalls)
 	}
-	pat, err := km.GetGitHubPAT()
-	if err != nil {
-		t.Fatalf("GetGitHubPAT failed: %v", err)
+}
+
+func TestBackendWithoutEnsurerYieldsErrUnavailable(t *testing.T) {
+	p := NewMemProvider()
+	p.Err = keyring.ErrUnavailable
+	_, err := keyring.NewKeyring("svc", p)
+	if !errors.Is(err, keyring.ErrUnavailable) {
+		t.Errorf("Expected ErrUnavailable, got %v", err)
 	}
-	if pat != "pat-1" {
-		t.Fatalf("pat=%q, want %q", pat, "pat-1")
+}
+
+func TestOpenKeyringNeverProbes(t *testing.T) {
+	p := NewMemProvider()
+	p.Err = errors.New("should never be called")
+	kr := keyring.OpenKeyring("svc", p)
+	if kr == nil {
+		t.Fatal("OpenKeyring returned nil")
+	}
+}
+
+func TestIndependentProviders(t *testing.T) {
+	t.Parallel()
+	p1 := NewMemProvider()
+	p2 := NewMemProvider()
+
+	kr1 := keyring.OpenKeyring("svc", p1)
+	kr2 := keyring.OpenKeyring("svc", p2)
+
+	if err := kr1.Set("key", "val1"); err != nil {
+		t.Fatalf("kr1.Set failed: %v", err)
+	}
+	if err := kr2.Set("key", "val2"); err != nil {
+		t.Fatalf("kr2.Set failed: %v", err)
 	}
 
-	if err := km.RotateHMACSecret("hmac-2"); err != nil {
-		t.Fatalf("RotateHMACSecret failed: %v", err)
+	v1, err := kr1.Get("key")
+	if err != nil || v1 != "val1" {
+		t.Errorf("kr1.Get expected val1, got %s (err %v)", v1, err)
 	}
-	if err := km.RotateGitHubPAT("pat-2"); err != nil {
-		t.Fatalf("RotateGitHubPAT failed: %v", err)
+	v2, err := kr2.Get("key")
+	if err != nil || v2 != "val2" {
+		t.Errorf("kr2.Get expected val2, got %s (err %v)", v2, err)
 	}
-	if hmac, _ := km.GetHMACSecret(); hmac != "hmac-2" {
-		t.Fatalf("rotated hmac=%q", hmac)
-	}
+}
 
-	if err := km.DeleteAll(); err != nil {
-		t.Fatalf("DeleteAll failed: %v", err)
+func TestFallback(t *testing.T) {
+	fb := keyring.Fallback{}
+	if err := fb.Set("s", "u", "p"); !errors.Is(err, keyring.ErrUnsupported) {
+		t.Errorf("Expected ErrUnsupported from Set, got %v", err)
 	}
-	if km.IsConfigured() {
-		t.Fatal("expected not configured after DeleteAll")
+	if _, err := fb.Get("s", "u"); !errors.Is(err, keyring.ErrUnsupported) {
+		t.Errorf("Expected ErrUnsupported from Get, got %v", err)
 	}
-	if _, err := km.GetGitHubPAT(); err == nil {
-		t.Fatal("expected error reading PAT after DeleteAll")
+	if err := fb.Delete("s", "u"); !errors.Is(err, keyring.ErrUnsupported) {
+		t.Errorf("Expected ErrUnsupported from Delete, got %v", err)
 	}
+	if err := fb.DeleteAll("s"); !errors.Is(err, keyring.ErrUnsupported) {
+		t.Errorf("Expected ErrUnsupported from DeleteAll, got %v", err)
+	}
+}
+
+func TestAutoDropInSignatures(t *testing.T) {
+	_ = auto.OpenKeyring("probe")
+	_, _ = auto.NewKeyring("probe")
+	_ = auto.New()
 }

@@ -1,9 +1,5 @@
 package keyring
 
-import (
-	"fmt"
-)
-
 const (
 	ServiceName   = "updater-cicd"
 	HMACSecretKey = "hmac-secret"
@@ -17,9 +13,9 @@ type KeyManager struct {
 	kr *Keyring
 }
 
-// New creates a KeyManager over the ServiceName service.
-func New() *KeyManager {
-	return &KeyManager{kr: &Keyring{service: ServiceName, log: func(...any) {}}}
+// New creates a KeyManager over the ServiceName service with provider p.
+func New(p Provider) *KeyManager {
+	return &KeyManager{kr: OpenKeyring(ServiceName, p)}
 }
 
 // SetLog sets the logging function.
@@ -30,11 +26,11 @@ func (m *KeyManager) SetLog(fn func(...any)) {
 // Setup realiza el setup inicial - solo primera ejecución
 func (m *KeyManager) Setup(hmacSecret, githubPAT string) error {
 	if err := m.kr.Set(HMACSecretKey, hmacSecret); err != nil {
-		return fmt.Errorf("failed to store HMAC secret: %w", err)
+		return Wrap("failed to store HMAC secret", err)
 	}
 
 	if err := m.kr.Set(GitHubPATKey, githubPAT); err != nil {
-		return fmt.Errorf("failed to store GitHub PAT: %w", err)
+		return Wrap("failed to store GitHub PAT", err)
 	}
 
 	return nil
@@ -44,7 +40,7 @@ func (m *KeyManager) Setup(hmacSecret, githubPAT string) error {
 func (m *KeyManager) GetHMACSecret() (string, error) {
 	secret, err := m.kr.Get(HMACSecretKey)
 	if err != nil {
-		return "", fmt.Errorf("HMAC secret not found in keyring: %w", err)
+		return "", Wrap("HMAC secret not found in keyring", err)
 	}
 	return secret, nil
 }
@@ -53,7 +49,7 @@ func (m *KeyManager) GetHMACSecret() (string, error) {
 func (m *KeyManager) GetGitHubPAT() (string, error) {
 	pat, err := m.kr.Get(GitHubPATKey)
 	if err != nil {
-		return "", fmt.Errorf("GitHub PAT not found in keyring: %w", err)
+		return "", Wrap("GitHub PAT not found in keyring", err)
 	}
 	return pat, nil
 }
