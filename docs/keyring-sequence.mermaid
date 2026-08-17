@@ -1,37 +1,30 @@
 sequenceDiagram
-    participant App
-    participant KR as Keyring (service-scoped)
-    participant PR as Provider
-    participant ZK as zalando/go-keyring
-    participant OS as OS Keyring
+    autonumber
+    participant App as Application
+    participant KR as Keyring
+    participant P as Provider (Backend)
+    participant OS as OS Credential Store / WebCrypto
 
-    Note over App,OS: Setup / Initialization
-    App->>KR: NewKeyring("my-app")
-    activate KR
-    KR->>PR: Set(service, "_probe", "test")
-    PR->>ZK: Set(service, "_probe", "test")
-    ZK->>OS: Store Secret
-    OS-->>ZK: Success
-    ZK-->>PR: nil
-    PR-->>KR: nil
-    KR-->>App: *Keyring
-    deactivate KR
+    App->>KR: NewKeyring(service, provider) / OpenKeyring(service, provider)
+    Note over KR: Keyring holds service & provider instance
 
-    Note over App,OS: Write / Read / Rotate
     App->>KR: Set(key, value)
-    KR->>PR: Set(service, key, value)
-    PR->>ZK: Set(service, key, value)
-    ZK->>OS: Store Secret
-    OS-->>ZK: Success
-    ZK-->>KR: nil
+    KR->>P: Set(service, key, value)
+    P->>OS: Store secret
+    OS-->>P: Success / Error
+    P-->>KR: Return result
+    KR-->>App: Return result
 
     App->>KR: Get(key)
-    KR->>PR: Get(service, key)
-    PR->>ZK: Get(service, key)
-    ZK->>OS: Retrieve Secret
-    OS-->>ZK: value
-    ZK-->>KR: value
-    KR-->>App: value
+    KR->>P: Get(service, key)
+    P->>OS: Retrieve secret
+    OS-->>P: Return value / ErrNotFound
+    P-->>KR: Return value / ErrNotFound
+    KR-->>App: Return value / ErrNotFound
 
-    Note over App,OS: KeyManager delegates to a Keyring<br/>scoped to ServiceName (updater-cicd)
-    App->>KR: KeyManager.Setup / Rotate / DeleteAll
+    App->>KR: Delete(key)
+    KR->>P: Delete(service, key)
+    P->>OS: Delete secret
+    OS-->>P: Success / ErrNotFound
+    P-->>KR: Return result
+    KR-->>App: Return result

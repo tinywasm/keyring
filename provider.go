@@ -1,12 +1,7 @@
 package keyring
 
-import (
-	"github.com/zalando/go-keyring"
-)
-
 // Provider abstracts the OS keyring backend (Secret Service, Keychain,
-// Credential Manager). The default provider talks to the system; tests swap
-// it with SetProvider to avoid touching real credentials.
+// Credential Manager).
 type Provider interface {
 	// Set stores password for user under service.
 	Set(service, user, password string) error
@@ -18,34 +13,18 @@ type Provider interface {
 	DeleteAll(service string) error
 }
 
-type zalandoProvider struct{}
+// Fallback answers every call with ErrUnsupported. It is what auto.Provider()
+// returns on platforms with no credential store.
+type Fallback struct{}
 
-func (zalandoProvider) Set(service, user, password string) error {
-	return keyring.Set(service, user, password)
-}
+func (Fallback) Set(service, user, password string) error { return ErrUnsupported }
+func (Fallback) Get(service, user string) (string, error) { return "", ErrUnsupported }
+func (Fallback) Delete(service, user string) error        { return ErrUnsupported }
+func (Fallback) DeleteAll(service string) error           { return ErrUnsupported }
 
-func (zalandoProvider) Get(service, user string) (string, error) {
-	return keyring.Get(service, user)
-}
-
-func (zalandoProvider) Delete(service, user string) error {
-	return keyring.Delete(service, user)
-}
-
-func (zalandoProvider) DeleteAll(service string) error {
-	return keyring.DeleteAll(service)
-}
-
-var currentProvider Provider = zalandoProvider{}
-
-// SetProvider replaces the OS keyring backend. Tests use it to inject an
-// in-memory provider; production code never calls it.
-func SetProvider(p Provider) {
-	currentProvider = p
-}
-
-// GetProvider returns the active keyring backend. Used to restore the real
-// provider after swapping it in tests.
-func GetProvider() Provider {
-	return currentProvider
+// Ensurer is implemented by backends that can repair their own prerequisites
+// (install packages, start a daemon). NewKeyring calls it when the initial
+// probe fails. Backends that cannot self-repair simply do not implement it.
+type Ensurer interface {
+	Ensure(log func(...any)) error
 }
