@@ -8,4 +8,4 @@ require (
 	github.com/tinywasm/webauthn v0.1.1
 )
 
-require github.com/tinywasm/base64 v0.0.4 // indirect
+require github.com/tinywasm/base64 v0.0.5 // indirect
